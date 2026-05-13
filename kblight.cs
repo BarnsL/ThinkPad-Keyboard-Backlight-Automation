@@ -61,39 +61,65 @@ class KbLight {
         return BitConverter.ToInt32(outp, 0);
     }
 
-    static void Main(string[] args) {
-        if (args.Length == 0 || args[0] == "--help" || args[0] == "-h") {
-            Console.WriteLine("kblight.exe <level>");
-            Console.WriteLine("  0 = off, 1 = low, 2 = high");
-            return;
-        }
+    static int ReadState() {
+        return CallPm(IOCTL_GET, 0);
+    }
 
-        int level = int.Parse(args[0]);
-        if (level < 0 || level > 2) {
-            Console.WriteLine("Level must be 0, 1, or 2");
-            Environment.Exit(1);
+    static int BuildSetArgument(int state, int level) {
+        return ((state & 0x00200000) != 0 ? 0x100 : 0) | (state & 0xF0) | level;
+    }
+
+    static void PrintUsage() {
+        Console.WriteLine("kblight.exe <level|status>");
+        Console.WriteLine("  0 = off, 1 = low, 2 = high");
+        Console.WriteLine("  status = print the current driver-reported backlight state");
+    }
+
+    static int Main(string[] args) {
+        if (args.Length == 0 || args[0] == "--help" || args[0] == "-h") {
+            PrintUsage();
+            return 0;
         }
 
         try {
-            // GET: read current state and verify hardware is present
-            int code = CallPm(IOCTL_GET, 0);
-            if ((code & 0x0050000) != 0x0050000) {
-                Console.WriteLine("Backlight hardware not ready (GET=0x" + code.ToString("X") + ")");
-                Environment.Exit(1);
+            int state = ReadState();
+            int currentLevel = state & 0xF;
+            int maxLevel = (state >> 8) & 0xF;
+
+            if (string.Equals(args[0], "status", StringComparison.OrdinalIgnoreCase)) {
+                bool ready = (state & 0x0050000) == 0x0050000;
+                bool preserveBit21 = (state & 0x00200000) != 0;
+                Console.WriteLine(
+                    "STATUS raw=0x{0:X} ready={1} level={2} max={3} preserveBit21={4}",
+                    state,
+                    ready,
+                    currentLevel,
+                    maxLevel,
+                    preserveBit21);
+                return ready ? 0 : 1;
             }
 
-            int currentLevel = code & 0xF;
-            int maxLevel = (code >> 8) & 0xF;
+            int level;
+            if (!int.TryParse(args[0], out level) || level < 0 || level > 2) {
+                Console.WriteLine("Level must be 0, 1, or 2, or use 'status'");
+                return 1;
+            }
+
+            // GET: read current state and verify hardware is present
+            if ((state & 0x0050000) != 0x0050000) {
+                Console.WriteLine("Backlight hardware not ready (GET=0x" + state.ToString("X") + ")");
+                return 1;
+            }
 
             // SET: construct argument preserving required flags from GET response
-            int arg = ((code & 0x00200000) != 0 ? 0x100 : 0) | (code & 0xF0) | level;
+            int arg = BuildSetArgument(state, level);
             int result = CallPm(IOCTL_SET, arg);
 
-            Console.WriteLine("OK level=" + level + " (was " + currentLevel + ", max=" + maxLevel + ")");
-            Environment.Exit(result); // 0 = success
+            Console.WriteLine("OK level=" + level + " (was " + currentLevel + ", max=" + maxLevel + ", raw=0x" + state.ToString("X") + ")");
+            return result; // 0 = success
         } catch (Exception ex) {
             Console.WriteLine("Error: " + ex.Message);
-            Environment.Exit(1);
+            return 1;
         }
     }
 }

@@ -1,8 +1,8 @@
 # ThinkPad Keyboard Backlight Automation
 
-Automatically restores the keyboard backlight to ON after every startup and resume from sleep on ThinkPad laptops running Windows.
+Automatically restores the keyboard backlight to ON after startup, unlock, and wake on ThinkPad laptops running Windows.
 
-ThinkPad keyboards do not persist backlight state across power events. This project fixes that with a lightweight scheduled task — no background process, no tray app, no Lenovo Vantage required.
+ThinkPad keyboards do not persist backlight state across power events. This project fixes that with a stable bootstrap script plus a lightweight hidden per-user monitor. There is no tray app and no Lenovo Vantage dependency.
 
 ---
 
@@ -25,9 +25,15 @@ SET argument: `(bit21 ? 0x100 : 0) | (GET & 0xF0) | desired_level`
 
 No elevation required. No external DLLs. Works entirely through the kernel driver that ships with Windows on ThinkPad hardware.
 
-The scheduled task fires on two triggers:
+The deployed runtime uses a stable bootstrap path at `C:\ProgramData\keyboard_backlight.ps1` that forwards into the canonical install directory `C:\ProgramData\KbBacklight\`. That bootstrap exists so older or protected task registrations keep working even after upgrades.
+
+When Task Scheduler can be updated, the task fires on four triggers:
 1. **Logon** — every time the user signs in
-2. **System Event ID 1** from `Microsoft-Windows-Power-Troubleshooter` — every resume from sleep or hibernate
+2. **Session unlock** — catches interactive wake/unlock flows
+3. **System Event ID 1** from `Microsoft-Windows-Power-Troubleshooter` — classic sleep/hibernate resume
+4. **System Event ID 507** from `Microsoft-Windows-Kernel-Power` — Modern Standby exit
+
+At logon, the bootstrap also starts a single hidden PowerShell monitor for the user session. That monitor listens for `PowerModeChanged` resume events and `SessionSwitch` unlock events, then re-runs the same backlight set logic with retries. This covers machines that wake through Modern Standby but never emit the older Power-Troubleshooter event.
 
 ---
 
@@ -88,11 +94,14 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /out:kblight.exe kblight
 .\install.ps1
 ```
 
-This copies files to `C:\ProgramData\KbBacklight\` and registers the scheduled task.
+This copies files to `C:\ProgramData\KbBacklight\`, writes the stable bootstrap path at `C:\ProgramData\keyboard_backlight.ps1`, and attempts to register or refresh the scheduled task.
+
+If `schtasks` returns `Access is denied`, the installer keeps any existing task in place and writes an `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` fallback so the same bootstrap still launches at sign-in.
 
 **4. Test it:**
 ```powershell
 schtasks /run /tn "ThinkPad Keyboard Backlight"
+Get-Content C:\ProgramData\KbBacklight\keyboard_backlight.log -Tail 20
 ```
 
 ---
@@ -105,6 +114,7 @@ schtasks /run /tn "ThinkPad Keyboard Backlight"
 kblight.exe 0    # off
 kblight.exe 1    # low
 kblight.exe 2    # high
+kblight.exe status
 ```
 
 Or from PowerShell directly without compiling — see `keyboard_backlight.ps1` which embeds the same logic inline using `Add-Type`.
@@ -124,9 +134,40 @@ Or from PowerShell directly without compiling — see `keyboard_backlight.ps1` w
 | File | Purpose |
 |---|---|
 | `kblight.cs` | C# source for the standalone backlight control tool |
+| `kblight.exe` | Compiled CLI used by the scheduled bootstrap and for manual validation |
 | `keyboard_backlight.ps1` | PowerShell script run by the scheduled task |
 | `install.ps1` | Registers the scheduled task |
 | `uninstall.ps1` | Removes the scheduled task and installed files |
+| `OPERATIONS.md` | Runtime notes, live validation steps, and troubleshooting commands |
+
+---
+
+## Troubleshooting
+
+Check the live driver state:
+```powershell
+C:\ProgramData\KbBacklight\kblight.exe status
+```
+
+Tail the runtime log:
+```powershell
+Get-Content C:\ProgramData\KbBacklight\keyboard_backlight.log -Tail 50
+```
+
+Confirm the hidden monitor process is running:
+```powershell
+Get-CimInstance Win32_Process -Filter "name = 'powershell.exe'" |
+	Where-Object { $_.CommandLine -like '*keyboard_backlight.ps1*' } |
+	Select-Object ProcessId, CommandLine
+```
+
+Inspect the current task registration:
+```powershell
+Get-ScheduledTask -TaskName "ThinkPad Keyboard Backlight" |
+	Select-Object TaskName, State, @{N='Arguments';E={$_.Actions.Arguments}}
+```
+
+If your machine uses Modern Standby and never emits `Power-Troubleshooter` Event ID 1, that is expected. The per-user monitor is the compatibility layer that keeps wake handling working on those systems. See `OPERATIONS.md` for the live diagnosis and fallback behavior.
 
 ---
 
@@ -141,7 +182,7 @@ Getting here took significant reverse engineering. A full writeup of every appro
 - `rainbow.dll` direct call — requires HID device handle initialization
 - Window messages to `shtctky.exe` — not the IPC mechanism used
 
-**What works:** `DeviceIoControl` on `\\.\IBMPmDrv` — discovered via [pspatel321/auto-backlight-for-thinkpad](https://github.com/pspatel321/auto-backlight-for-thinkpad).
+**What works:** `DeviceIoControl` on `\\.\IBMPmDrv` — discovered via [pspatel321/auto-backlight-for-thinkpad](https://github.com/pspatel321/auto-backlight-for-thinkpad). The repo now layers a stable bootstrap path, retries, logging, and a hidden per-user wake monitor on top of that control method.
 
 ---
 

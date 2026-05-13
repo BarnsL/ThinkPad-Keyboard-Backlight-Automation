@@ -1,9 +1,27 @@
 # uninstall.ps1
-# Removes the scheduled task and installed files.
+# Removes the scheduled task, installed files, and the legacy compatibility shim.
 
-$taskName  = "ThinkPad Keyboard Backlight"
+$taskNames = @(
+	"ThinkPad Keyboard Backlight",
+	"ThinkPad Keyboard Backlight Automation"
+)
 $installDir = "C:\ProgramData\KbBacklight"
+$legacyScriptPath = "C:\ProgramData\keyboard_backlight.ps1"
+$runKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$runValueName = "ThinkPad Keyboard Backlight"
 
-schtasks /delete /tn $taskName /f 2>&1
-if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force }
+foreach ($taskName in $taskNames) {
+	schtasks /delete /tn $taskName /f 2>$null | Out-Null
+}
+
+if (Test-Path $installDir) {
+	Remove-Item $installDir -Recurse -Force
+}
+
+if (Test-Path $legacyScriptPath) {
+	Remove-Item $legacyScriptPath -Force
+}
+
+Remove-ItemProperty -Path $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
+
 Write-Host "Uninstalled."

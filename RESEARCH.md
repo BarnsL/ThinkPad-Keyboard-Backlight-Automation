@@ -93,3 +93,11 @@ CloseHandle(h);
 - `tphkload` modules confirmed: `TPHKLOAD.exe`, `TPOSD.DLL`, `SHTCTKY.DLL`, `mmstate.dll`, `smm10.dll`, `spkvol.dll`
 - ACPI device path: `\_SB.PC00.LPCB.EC.LHKF` (under Embedded Controller `ACPI\PNP0C09`)
 - `shtctky.exe` references COM GUIDs `{56E4AAEA-4695-4DBC-A87F-0D666B421314}` and `{10FFBC57-CA53-4D1E-9E49-60AD847F0299}` — not registered in HKCR, in-process only
+
+---
+
+## Operational Hardening Notes
+
+- On this Windows 11 ThinkPad, wake events are primarily logged as `Microsoft-Windows-Kernel-Power` Event ID `507` (Modern Standby exit) plus session unlock activity, not `Microsoft-Windows-Power-Troubleshooter` Event ID `1`. A task that only watches Power-Troubleshooter can appear correctly installed but still miss every real wake event.
+- Some user contexts can read the existing scheduled task but cannot modify or replace it: both `schtasks /delete` and `schtasks /create` return `Access is denied`. The practical mitigation is to keep `C:\ProgramData\keyboard_backlight.ps1` as a stable bootstrap path, then update the file it points to instead of assuming the task itself can always be rewritten.
+- A lightweight per-user monitor launched at logon is a pragmatic compatibility layer for Modern Standby systems. It can listen for resume and unlock events in the interactive session and re-run `kblight.exe 2` with retry logic even when the scheduled task trigger set is frozen.
