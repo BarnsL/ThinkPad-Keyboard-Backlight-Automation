@@ -1,8 +1,8 @@
 # ThinkPad Keyboard Backlight Automation
 
-Automatically restores the keyboard backlight to ON after startup, unlock, wake, or any later point where the hardware reports the light as off on ThinkPad laptops running Windows.
+Automatically restores the keyboard backlight to low (`level 1`) after startup, unlock, wake, or any later point where the hardware reports the light as off or too bright on ThinkPad laptops running Windows.
 
-ThinkPad keyboards do not persist backlight state across power events. Some systems also let the light drop back to off later in the session. This project fixes that with a stable bootstrap script plus a lightweight hidden per-user monitor that keeps watching the driver state. There is no tray app and no Lenovo Vantage dependency.
+ThinkPad keyboards do not persist backlight state across power events. Some systems also let the light drop back to off later in the session. This project fixes that with a stable bootstrap script plus a lightweight hidden per-user monitor that keeps watching the driver state. The automation target is hard-capped at `level 1`, so it will never intentionally restore to `level 2`. There is no tray app and no Lenovo Vantage dependency.
 
 ---
 
@@ -33,7 +33,7 @@ When Task Scheduler can be updated, the task fires on four triggers:
 3. **System Event ID 1** from `Microsoft-Windows-Power-Troubleshooter` — classic sleep/hibernate resume
 4. **System Event ID 507** from `Microsoft-Windows-Kernel-Power` — Modern Standby exit
 
-At logon, the bootstrap also starts a single hidden PowerShell monitor for the user session. That monitor listens for `PowerModeChanged` resume events and `SessionSwitch` unlock events, and it also polls the driver state periodically. If the driver reports level `0` at any point, the monitor turns the light back on. This covers machines that wake through Modern Standby but never emit the older Power-Troubleshooter event, and it also handles cases where the backlight goes dark later without a fresh wake event.
+At logon, the bootstrap also starts a single hidden PowerShell monitor for the user session. That monitor listens for `PowerModeChanged` resume events and `SessionSwitch` unlock events, and it also polls the driver state periodically. If the driver reports level `0` at any point, or reports any level higher than the automation target, the monitor normalizes the light back to `level 1`. This covers machines that wake through Modern Standby but never emit the older Power-Troubleshooter event, and it also handles cases where the backlight goes dark later without a fresh wake event.
 
 ---
 
@@ -119,6 +119,8 @@ kblight.exe status
 
 Or from PowerShell directly without compiling — see `keyboard_backlight.ps1` which embeds the same logic inline using `Add-Type`.
 
+The automation script itself defaults to `level 1` and clamps any higher requested automation level back down to `1`, so stale launchers that still pass `-Level 2` are safely normalized.
+
 ---
 
 ## Uninstall
@@ -158,6 +160,8 @@ If you want a faster or slower off-detection loop for manual testing, run the sc
 ```powershell
 C:\ProgramData\KbBacklight\keyboard_backlight.ps1 -EnsureMonitor -MonitorPollIntervalSeconds 5
 ```
+
+If the light is manually pushed to `level 2`, the next bootstrap run or monitor pass will drive it back down to `level 1`.
 
 Confirm the hidden monitor process is running:
 ```powershell

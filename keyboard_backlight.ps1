@@ -6,7 +6,7 @@
 
 param(
     [ValidateRange(0, 2)]
-    [int]$Level = 2,
+    [int]$Level = 1,
 
     [ValidateRange(0, 30)]
     [int]$InitialDelaySeconds = 2,
@@ -33,6 +33,7 @@ $scriptPath = if ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path }
 $cliPath = Join-Path $scriptDir "kblight.exe"
 $logPath = Join-Path $scriptDir "keyboard_backlight.log"
 $monitorMutexName = "Local\ThinkPadKeyboardBacklightMonitor"
+$maxAutomationLevel = 1
 
 if ((Test-Path $logPath) -and ((Get-Item $logPath).Length -gt 262144)) {
     Move-Item $logPath "$logPath.1" -Force
@@ -174,19 +175,35 @@ function Invoke-BacklightAction {
     return 1
 }
 
-function Invoke-BacklightIfOff {
+function Resolve-TargetLevel {
+    param([int]$RequestedLevel)
+
+    if ($RequestedLevel -le 0) {
+        return 0
+    }
+
+    if ($RequestedLevel -gt $maxAutomationLevel) {
+        return $maxAutomationLevel
+    }
+
+    return $RequestedLevel
+}
+
+function Invoke-BacklightIfNeeded {
     param(
         [int]$TargetLevel,
         [string]$Reason,
         [switch]$RestoreWhenNotReady
     )
 
+    $effectiveTargetLevel = Resolve-TargetLevel -RequestedLevel $TargetLevel
+
     try {
         $state = Get-BacklightStateInfo
     } catch {
         Write-BacklightLog "state-check failed reason=$Reason error=$($_.Exception.Message)"
         if ($RestoreWhenNotReady) {
-            return (Invoke-BacklightAction -TargetLevel $TargetLevel)
+            return (Invoke-BacklightAction -TargetLevel $effectiveTargetLevel)
         }
         return 1
     }
@@ -194,14 +211,14 @@ function Invoke-BacklightIfOff {
     if (-not $state.Ready) {
         Write-BacklightLog "state-check not-ready reason=$Reason raw=$($state.RawHex)"
         if ($RestoreWhenNotReady) {
-            return (Invoke-BacklightAction -TargetLevel $TargetLevel)
+            return (Invoke-BacklightAction -TargetLevel $effectiveTargetLevel)
         }
         return 1
     }
 
-    if ($state.Level -eq 0) {
-        Write-BacklightLog "detected off reason=$Reason raw=$($state.RawHex)"
-        return (Invoke-BacklightAction -TargetLevel $TargetLevel)
+    if ($state.Level -ne $effectiveTargetLevel) {
+        Write-BacklightLog "detected mismatch reason=$Reason current=$($state.Level) target=$effectiveTargetLevel raw=$($state.RawHex)"
+        return (Invoke-BacklightAction -TargetLevel $effectiveTargetLevel)
     }
 
     return 0
@@ -250,24 +267,24 @@ function Start-MonitorLoop {
 
     try {
         Write-BacklightLog "monitor started pid=$PID pollInterval=$MonitorPollIntervalSeconds"
-        [void](Invoke-BacklightIfOff -TargetLevel $Level -Reason "monitor-start" -RestoreWhenNotReady)
+        [void](Invoke-BacklightIfNeeded -TargetLevel $Level -Reason "monitor-start" -RestoreWhenNotReady)
         Register-ObjectEvent -InputObject ([Microsoft.Win32.SystemEvents]) -EventName PowerModeChanged -SourceIdentifier $powerSource | Out-Null
         Register-ObjectEvent -InputObject ([Microsoft.Win32.SystemEvents]) -EventName SessionSwitch -SourceIdentifier $sessionSource | Out-Null
 
         while ($true) {
             $event = Wait-Event -Timeout $MonitorPollIntervalSeconds
             if ($null -eq $event) {
-                [void](Invoke-BacklightIfOff -TargetLevel $Level -Reason "poll")
+                [void](Invoke-BacklightIfNeeded -TargetLevel $Level -Reason "poll")
                 continue
             }
 
             try {
                 if ($event.SourceIdentifier -eq $powerSource -and $event.SourceEventArgs.Mode -eq [Microsoft.Win32.PowerModes]::Resume) {
                     Write-BacklightLog "monitor event=resume"
-                    [void](Invoke-BacklightIfOff -TargetLevel $Level -Reason "resume" -RestoreWhenNotReady)
+                    [void](Invoke-BacklightIfNeeded -TargetLevel $Level -Reason "resume" -RestoreWhenNotReady)
                 } elseif ($event.SourceIdentifier -eq $sessionSource -and $event.SourceEventArgs.Reason -eq [Microsoft.Win32.SessionSwitchReason]::SessionUnlock) {
                     Write-BacklightLog "monitor event=session-unlock"
-                    [void](Invoke-BacklightIfOff -TargetLevel $Level -Reason "session-unlock" -RestoreWhenNotReady)
+                    [void](Invoke-BacklightIfNeeded -TargetLevel $Level -Reason "session-unlock" -RestoreWhenNotReady)
                 }
             } catch {
                 Write-BacklightLog "monitor error=$($_.Exception.Message)"
@@ -290,7 +307,7 @@ if ($Monitor) {
 }
 
 if ($EnsureMonitor) {
-    $exitCode = Invoke-BacklightIfOff -TargetLevel $Level -Reason "bootstrap" -RestoreWhenNotReady
+    $exitCode = Invoke-BacklightIfNeeded -TargetLevel $Level -Reason "bootstrap" -RestoreWhenNotReady
     if (-not (Test-MonitorRunning)) {
         Start-BacklightMonitor -TargetLevel $Level
         Write-BacklightLog "monitor bootstrap launched"
