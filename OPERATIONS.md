@@ -48,8 +48,9 @@ That monitor listens for:
 
 - `Microsoft.Win32.SystemEvents.PowerModeChanged` resume events
 - `Microsoft.Win32.SystemEvents.SessionSwitch` unlock events
+- A periodic driver-state poll that restores the light if the hardware reports level `0`
 
-This is the compatibility layer for Modern Standby systems where the scheduled task trigger set cannot be updated.
+This is the compatibility layer for Modern Standby systems where the scheduled task trigger set cannot be updated, and it now also covers cases where the keyboard backlight falls back to off after the session is already running.
 
 ---
 
@@ -103,6 +104,7 @@ Expected log events:
 - `success attempt=1 exitCode=0`
 - `monitor bootstrap launched`
 - `monitor started pid=...`
+- `detected off reason=... raw=...` when the monitor catches an off state and restores it
 - `monitor already running` on repeated bootstrap launches
 
 Confirm the background monitor process:
@@ -117,6 +119,12 @@ Confirm the HKCU Run fallback when task updates are blocked:
 
 ```powershell
 Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ThinkPad Keyboard Backlight'
+```
+
+To shorten the detection interval during manual testing, start the bootstrap with a custom poll interval:
+
+```powershell
+& 'C:\ProgramData\KbBacklight\keyboard_backlight.ps1' -EnsureMonitor -MonitorPollIntervalSeconds 5
 ```
 
 ---
