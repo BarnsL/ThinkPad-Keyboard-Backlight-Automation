@@ -54,7 +54,7 @@ That monitor listens for:
 
 - `Microsoft.Win32.SystemEvents.PowerModeChanged` resume events
 - `Microsoft.Win32.SystemEvents.SessionSwitch` unlock events
-- A periodic driver-state poll that restores the light if the hardware reports level `0` or normalizes it back to `1` if it reports `2`
+- A periodic driver-state poll that restores the light if the hardware reports level `0`
 
 This is the compatibility layer for Modern Standby systems where the scheduled task trigger set cannot be updated, and it now also covers cases where the keyboard backlight falls back to off after the session is already running.
 
@@ -110,7 +110,7 @@ Expected log events:
 - `success attempt=1 exitCode=0`
 - `monitor bootstrap launched`
 - `monitor started pid=...`
-- `detected mismatch reason=... current=... target=1 raw=...` when the monitor catches an off or too-bright state and normalizes it
+- `detected off reason=... target=1 raw=...` when the monitor catches an off state and restores it
 - `monitor already running` on repeated bootstrap launches
 
 Confirm the background monitor process:
@@ -140,9 +140,9 @@ To shorten the detection interval during manual testing, start the bootstrap wit
 The following were verified after hardening:
 
 - `C:\ProgramData\KbBacklight\kblight.exe status` returned a ready driver state.
-- Running `C:\ProgramData\keyboard_backlight.ps1` normalized the backlight to `level 1` successfully.
+- Running `C:\ProgramData\keyboard_backlight.ps1` restored the backlight to `level 1` successfully when it was off.
 - The runtime log recorded successful CLI execution and monitor startup.
-- Forcing the hardware to `level 2` and then running the bootstrap normalized it back down to `level 1`.
+- Forcing the hardware to `level 2` and then running the bootstrap left it at `level 2`.
 - Re-running the bootstrap did not create duplicate monitors.
 - Exactly one hidden PowerShell monitor process remained active.
 
