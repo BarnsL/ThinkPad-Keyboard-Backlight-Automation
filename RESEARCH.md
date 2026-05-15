@@ -2,6 +2,8 @@
 
 Full notes on every approach tried to automate the ThinkPad keyboard backlight on Windows, what failed, and what ultimately worked.
 
+Update (May 2026): this repository also includes HP EliteBook (Poly Studio-capable models) support through documented HP BIOS automation interfaces. See HP section near the end.
+
 ---
 
 ## System Architecture
@@ -101,3 +103,44 @@ CloseHandle(h);
 - On this Windows 11 ThinkPad, wake events are primarily logged as `Microsoft-Windows-Kernel-Power` Event ID `507` (Modern Standby exit) plus session unlock activity, not `Microsoft-Windows-Power-Troubleshooter` Event ID `1`. A task that only watches Power-Troubleshooter can appear correctly installed but still miss every real wake event.
 - Some user contexts can read the existing scheduled task but cannot modify or replace it: both `schtasks /delete` and `schtasks /create` return `Access is denied`. The practical mitigation is to keep `C:\ProgramData\keyboard_backlight.ps1` as a stable bootstrap path, then update the file it points to instead of assuming the task itself can always be rewritten.
 - A lightweight per-user monitor launched at logon is a pragmatic compatibility layer for Modern Standby systems. It can listen for resume and unlock events in the interactive session and re-run `kblight.exe 2` with retry logic even when the scheduled task trigger set is frozen.
+
+---
+
+## HP EliteBook / Poly Studio Path (Documented Interfaces)
+
+### What was already documented
+
+HP Client Management Script Library (CMSL) documents BIOS settings automation with:
+
+- `Get-HPBIOSSettingsList`
+- `Set-HPBIOSSettingValue`
+
+References consulted:
+
+- https://developers.hp.com/hp-client-management/doc/client-management-script-library
+- https://developers.hp.com/hp-client-management/doc/bios-and-device
+
+### Design decision
+
+Unlike ThinkPad `IBMPmDrv`, no equivalent public HP kernel-level keyboard backlight runtime IOCTL path was identified in this workstream. To avoid undocumented or brittle behavior, HP support in this repository uses:
+
+1. HP CMSL BIOS setting writes (preferred).
+2. HP Instrumented BIOS WMI fallback (`root\HP\InstrumentedBIOS`) when CMSL cmdlets are unavailable.
+
+### Practical implication
+
+- ThinkPad path can force immediate level changes (`0/1/2`).
+- HP path is best-effort persistence automation (timeout/enable-style BIOS setting control), which depends on model firmware capabilities and BIOS policy/password state.
+
+### Validation signals for HP
+
+`keyboard_backlight.log` should include one of:
+
+- `success via hp-cmsl`
+- `success via hp-wmi-fallback`
+
+Failures usually indicate one of:
+
+- HP CMSL module not present
+- No keyboard backlight setting exposed by that firmware
+- BIOS setup password/policy blocks write operations

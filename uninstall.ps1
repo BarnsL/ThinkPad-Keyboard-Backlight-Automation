@@ -3,12 +3,17 @@
 
 $taskNames = @(
 	"ThinkPad Keyboard Backlight",
-	"ThinkPad Keyboard Backlight Automation"
+	"ThinkPad Keyboard Backlight Automation",
+	"HP EliteBook Keyboard Backlight",
+	"HP Keyboard Backlight Automation"
 )
 $installDir = "C:\ProgramData\KbBacklight"
 $legacyScriptPath = "C:\ProgramData\keyboard_backlight.ps1"
 $runKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$runValueName = "ThinkPad Keyboard Backlight"
+$runValueNames = @(
+	"ThinkPad Keyboard Backlight",
+	"HP EliteBook Keyboard Backlight"
+)
 
 foreach ($taskName in $taskNames) {
 	schtasks /delete /tn $taskName /f 2>$null | Out-Null
@@ -22,6 +27,8 @@ if (Test-Path $legacyScriptPath) {
 	Remove-Item $legacyScriptPath -Force
 }
 
-Remove-ItemProperty -Path $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
+foreach ($runValueName in $runValueNames) {
+	Remove-ItemProperty -Path $runKeyPath -Name $runValueName -ErrorAction SilentlyContinue
+}
 
 Write-Host "Uninstalled."

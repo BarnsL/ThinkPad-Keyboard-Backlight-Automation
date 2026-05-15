@@ -1,127 +1,138 @@
-# ThinkPad Keyboard Backlight Automation
+# Windows Keyboard Backlight Automation
 
-Automatically restores the keyboard backlight to low (`level 1`) after startup, unlock, wake, or any later point where the hardware reports the light as off on ThinkPad laptops running Windows.
+Automates keyboard backlight behavior on Windows for:
 
-ThinkPad keyboards do not persist backlight state across power events. Some systems also let the light drop back to off later in the session. This project fixes that with a stable bootstrap script plus a lightweight hidden per-user monitor that keeps watching the driver state. The automation target is hard-capped at `level 1`, so it will never intentionally restore to `level 2`. There is no tray app and no Lenovo Vantage dependency.
+- Lenovo ThinkPad systems using the documented `IBMPmDrv` device interface.
+- HP EliteBook systems (including Poly Studio variants) using documented HP BIOS automation surfaces (HP CMSL and HP Instrumented BIOS WMI fallback).
+
+---
+
+## Platform Matrix
+
+| Platform | Runtime | Immediate level control | Persistence control |
+|---|---|---|---|
+| ThinkPad | `keyboard_backlight.ps1` + `kblight.exe` | Yes (`0/1/2`) | Yes (monitor + task triggers) |
+| HP EliteBook / Poly Studio | `hp_keyboard_backlight.ps1` | No documented direct runtime API | Yes (BIOS keyboard backlight setting automation) |
+
+Important: HP support in this repository intentionally uses documented interfaces only. On many EliteBook models, public tooling exposes keyboard backlight timeout/enable policy, not an immediate on-demand brightness level API equivalent to ThinkPad `IBMPmDrv`.
+
+---
+
+## What Is Already Documented For HP
+
+The current documented vendor path for HP automation is HP CMSL (Client Management Script Library):
+
+- BIOS and Device module exposes `Get-HPBIOSSettingsList` and `Set-HPBIOSSettingValue`.
+- This allows discovery and setting of BIOS attributes, including keyboard backlight-related settings where available on the specific model.
+
+Reference pages checked:
+
+- https://developers.hp.com/hp-client-management/doc/client-management-script-library
+- https://developers.hp.com/hp-client-management/doc/bios-and-device
+
+This repository implements that documented route first, then falls back to HP Instrumented BIOS WMI (`root\HP\InstrumentedBIOS`) when CMSL cmdlets are unavailable.
 
 ---
 
 ## How It Works
 
-The IBM Power Management driver (`IBMPmDrv`) exposes a device at `\\.\IBMPmDrv`. Two `DeviceIoControl` IOCTL codes control the keyboard backlight:
+### ThinkPad path
+
+ThinkPad control uses `DeviceIoControl` against `\\.\IBMPmDrv`:
 
 | IOCTL | Decimal | Purpose |
 |---|---|---|
-| GET | `2238080` | Read current backlight level and hardware capabilities |
-| SET | `2238084` | Write a new backlight level |
+| GET | `2238080` | Read current backlight state/capabilities |
+| SET | `2238084` | Set desired backlight level |
 
-The GET response is a packed 32-bit integer:
-- Bits `3:0` — current level (`0`=off, `1`=low, `2`=high)
-- Bits `11:8` — max supported level (typically `2`)
-- Bits `19:16` — must equal `0x5` for hardware to be ready
-- Bit `21` — flag that must be preserved when constructing the SET argument
+The scheduled bootstrap starts a single hidden monitor that reacts to resume/unlock/poll events and restores from off (`0`) to low (`1`) when needed.
 
-SET argument: `(bit21 ? 0x100 : 0) | (GET & 0xF0) | desired_level`
+### HP EliteBook path
 
-No elevation required. No external DLLs. Works entirely through the kernel driver that ships with Windows on ThinkPad hardware.
+HP control is implemented as a best-effort BIOS setting apply routine:
 
-The deployed runtime uses a stable bootstrap path at `C:\ProgramData\keyboard_backlight.ps1` that forwards into the canonical install directory `C:\ProgramData\KbBacklight\`. That bootstrap exists so older or protected task registrations keep working even after upgrades.
+1. Detect keyboard backlight related BIOS settings via HP CMSL.
+2. Select a persistence-oriented value (`Never`, `Always On`, `Enabled`, or longest timeout available).
+3. Apply with `Set-HPBIOSSettingValue`.
+4. If CMSL is unavailable, fall back to `root\HP\InstrumentedBIOS` classes.
 
-When Task Scheduler can be updated, the task fires on four triggers:
-1. **Logon** — every time the user signs in
-2. **Session unlock** — catches interactive wake/unlock flows
-3. **System Event ID 1** from `Microsoft-Windows-Power-Troubleshooter` — classic sleep/hibernate resume
-4. **System Event ID 507** from `Microsoft-Windows-Kernel-Power` — Modern Standby exit
-
-At logon, the bootstrap also starts a single hidden PowerShell monitor for the user session. That monitor listens for `PowerModeChanged` resume events and `SessionSwitch` unlock events, and it also polls the driver state periodically. If the driver reports level `0` at any point, the monitor restores the light to `level 1`. If you manually set the backlight to `level 2`, the automation leaves it there. This covers machines that wake through Modern Standby but never emit the older Power-Troubleshooter event, and it also handles cases where the backlight goes dark later without a fresh wake event.
+The same scheduler triggers (logon/unlock/resume) are used so settings are re-applied after common power transitions.
 
 ---
 
 ## Requirements
 
 - Windows 10 or 11
-- A ThinkPad with a backlit keyboard
-- Lenovo PM Service (`IBMPMSVC`) running — this is installed by default on all ThinkPads
-- .NET Framework 4.x (pre-installed on all modern Windows)
-
----
-
-## Compatible ThinkPad Models
-
-Tested on and confirmed working with models that use the `IBMPmDrv` kernel driver. This includes most ThinkPad T, X, L, E, and P series from roughly 2015 onwards.
-
-**Confirmed working:**
-- ThinkPad T14 Gen 2 (20W8)
-- ThinkPad X1 Carbon (Gen 6, 7, 8, 9, 10)
-- ThinkPad X1 Extreme (Gen 1, 2, 3)
-- ThinkPad P1 (Gen 1, 2, 3)
-- ThinkPad T480, T480s, T490, T490s, T495
-- ThinkPad T14s Gen 1, Gen 2
-- ThinkPad X390, X395
-- ThinkPad L14, L15 Gen 1, Gen 2
-- ThinkPad E14, E15 Gen 2, Gen 3
-
-**Likely compatible** (same driver stack):
-- Any ThinkPad T/X/L/E/P series from ~2015 onwards running Windows 10/11
-- ThinkPad X13, X13 Yoga
-- ThinkPad T15, T15g
-- ThinkPad P15, P15s, P17
-
-**Not compatible:**
-- ThinkPad models without a backlit keyboard
-- Very old models (pre-2014) that use a different PM driver
-- IdeaPad / Yoga / Legion (different driver architecture)
-
-To check if your machine is compatible, run in PowerShell:
-```powershell
-Get-Service IBMPMSVC
-```
-If it returns `Running`, this tool will work.
+- PowerShell 5.1+ (default on supported Windows)
+- For ThinkPad: Lenovo PM service (`IBMPMSVC`) and .NET Framework 4.x
+- For HP EliteBook: HP CMSL recommended (`Get-HPBIOSSettingsList` / `Set-HPBIOSSettingValue`), with WMI fallback
 
 ---
 
 ## Installation
 
-**1. Clone or download this repo**
+Run installer with auto-detection:
 
-**2. Build `kblight.exe`** (or use the pre-built binary if provided):
-```powershell
-C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /out:kblight.exe kblight.cs
-```
-
-**3. Run the installer** (no elevation required):
 ```powershell
 .\install.ps1
 ```
 
-This copies files to `C:\ProgramData\KbBacklight\`, writes the stable bootstrap path at `C:\ProgramData\keyboard_backlight.ps1`, and attempts to register or refresh the scheduled task.
+Or force a platform:
 
-If `schtasks` returns `Access is denied`, the installer keeps any existing task in place and writes an `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` fallback so the same bootstrap still launches at sign-in.
-
-The repository is safe to publish as-is: runtime logs are generated under `C:\ProgramData\KbBacklight\` at install time and are not tracked in git, and the tracked files do not contain local usernames, tokens, or machine-specific paths beyond generic Windows system locations required for installation.
-
-**4. Test it:**
 ```powershell
-schtasks /run /tn "ThinkPad Keyboard Backlight"
-Get-Content C:\ProgramData\KbBacklight\keyboard_backlight.log -Tail 20
+.\install.ps1 -Platform ThinkPad
+.\install.ps1 -Platform HpEliteBook
 ```
+
+Installer behavior:
+
+1. Copies payloads to `C:\ProgramData\KbBacklight\`.
+2. Builds `kblight.exe` when needed for ThinkPad path.
+3. Writes stable bootstrap `C:\ProgramData\keyboard_backlight.ps1`.
+4. Registers a scheduled task for logon, unlock, and resume events.
+5. Falls back to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` if task update is blocked.
 
 ---
 
-## Manual Usage
+## Testing
 
-`kblight.exe` can also be used standalone:
+### Common checks
 
+```powershell
+schtasks /run /tn "ThinkPad Keyboard Backlight"
+schtasks /run /tn "HP EliteBook Keyboard Backlight"
+Get-Content C:\ProgramData\KbBacklight\keyboard_backlight.log -Tail 50
 ```
-kblight.exe 0    # off
-kblight.exe 1    # low
-kblight.exe 2    # high
-kblight.exe status
+
+### ThinkPad checks
+
+```powershell
+C:\ProgramData\KbBacklight\kblight.exe status
+& 'C:\ProgramData\KbBacklight\keyboard_backlight.ps1' -EnsureMonitor
 ```
 
-Or from PowerShell directly without compiling — see `keyboard_backlight.ps1` which embeds the same logic inline using `Add-Type`.
+Expected logs include `success attempt=...` and monitor lifecycle events.
 
-The automation script itself defaults to `level 1` and clamps any higher requested automation level back down to `1`, so stale launchers that still pass `-Level 2` are safely normalized.
+### HP EliteBook checks
+
+Verify CMSL cmdlets:
+
+```powershell
+Get-Command Get-HPBIOSSettingsList, Set-HPBIOSSettingValue
+```
+
+Run HP routine directly:
+
+```powershell
+& 'C:\ProgramData\KbBacklight\hp_keyboard_backlight.ps1' -EnsureMonitor
+```
+
+Expected logs include one of:
+
+- `success via hp-cmsl`
+- `success via hp-wmi-fallback`
+
+If BIOS settings are locked by setup password, log entries will show apply failures and no setting changes.
 
 ---
 
@@ -137,67 +148,24 @@ The automation script itself defaults to `level 1` and clamps any higher request
 
 | File | Purpose |
 |---|---|
-| `kblight.cs` | C# source for the standalone backlight control tool |
-| `kblight.exe` | Compiled CLI used by the scheduled bootstrap and for manual validation |
-| `keyboard_backlight.ps1` | PowerShell script run by the scheduled task |
-| `install.ps1` | Registers the scheduled task |
-| `uninstall.ps1` | Removes the scheduled task and installed files |
-| `OPERATIONS.md` | Runtime notes, live validation steps, and troubleshooting commands |
-
----
-
-## Troubleshooting
-
-Check the live driver state:
-```powershell
-C:\ProgramData\KbBacklight\kblight.exe status
-```
-
-Tail the runtime log:
-```powershell
-Get-Content C:\ProgramData\KbBacklight\keyboard_backlight.log -Tail 50
-```
-
-If you want a faster or slower off-detection loop for manual testing, run the script directly with a custom poll interval:
-```powershell
-C:\ProgramData\KbBacklight\keyboard_backlight.ps1 -EnsureMonitor -MonitorPollIntervalSeconds 5
-```
-
-If the light is manually pushed to `level 2`, the automation will leave it alone and only intervene later if the backlight drops all the way to `off`.
-
-Confirm the hidden monitor process is running:
-```powershell
-Get-CimInstance Win32_Process -Filter "name = 'powershell.exe'" |
-	Where-Object { $_.CommandLine -like '*keyboard_backlight.ps1*' } |
-	Select-Object ProcessId, CommandLine
-```
-
-Inspect the current task registration:
-```powershell
-Get-ScheduledTask -TaskName "ThinkPad Keyboard Backlight" |
-	Select-Object TaskName, State, @{N='Arguments';E={$_.Actions.Arguments}}
-```
-
-If your machine uses Modern Standby and never emits `Power-Troubleshooter` Event ID 1, that is expected. The per-user monitor is the compatibility layer that keeps wake handling working on those systems. See `OPERATIONS.md` for the live diagnosis and fallback behavior.
+| `keyboard_backlight.ps1` | ThinkPad runtime script with monitor loop |
+| `hp_keyboard_backlight.ps1` | HP EliteBook runtime script (CMSL/WMI based) |
+| `kblight.cs` | ThinkPad CLI source (`IBMPmDrv`) |
+| `install.ps1` | Auto-detecting platform installer |
+| `uninstall.ps1` | Removes both ThinkPad and HP task variants |
+| `OPERATIONS.md` | Process and test checklist |
+| `RESEARCH.md` | Reverse engineering and vendor research notes |
 
 ---
 
 ## Research Notes
 
-Getting here took significant reverse engineering. A full writeup of every approach tried (WMI, window messages, named pipes, DLL injection, raw scancode injection, etc.) and why they failed is in [`RESEARCH.md`](RESEARCH.md).
-
-**TL;DR of what doesn't work:**
-- `SendInput` / scancode injection — `tphkload` runs in Session 0, unreachable
-- `Lenovo_SetFunctionRequest` WMI — requires elevation + correct string format unknown
-- Named pipe `ShortcutKey` — server-only, cannot connect as client
-- `rainbow.dll` direct call — requires HID device handle initialization
-- Window messages to `shtctky.exe` — not the IPC mechanism used
-
-**What works:** `DeviceIoControl` on `\\.\IBMPmDrv` — discovered via [pspatel321/auto-backlight-for-thinkpad](https://github.com/pspatel321/auto-backlight-for-thinkpad). The repo now layers a stable bootstrap path, retries, logging, and a hidden per-user wake monitor on top of that control method.
+Detailed ThinkPad reverse engineering plus HP documentation path checks are in `RESEARCH.md`.
 
 ---
 
 ## Credits
 
-- Control method: [pspatel321/auto-backlight-for-thinkpad](https://github.com/pspatel321/auto-backlight-for-thinkpad)
-- Additional reference: [ligius-/lenovo-backlight-control](https://github.com/ligius-/lenovo-backlight-control)
+- ThinkPad control method: [pspatel321/auto-backlight-for-thinkpad](https://github.com/pspatel321/auto-backlight-for-thinkpad)
+- Additional ThinkPad reference: [ligius-/lenovo-backlight-control](https://github.com/ligius-/lenovo-backlight-control)
+- HP management documentation: HP Client Management Script Library (CMSL)

@@ -1,29 +1,17 @@
 # OPERATIONS.md
 
-Runtime notes and validation checklist for the deployed ThinkPad keyboard backlight automation.
+Runtime notes and validation checklist for deployed keyboard backlight automation on ThinkPad and HP EliteBook systems.
 
 ---
 
-## Live Findings
-
-These behaviors were confirmed on May 13, 2026 on the current machine:
-
-- The existing scheduled task `ThinkPad Keyboard Backlight` is readable but not mutable in the current user context.
-- `schtasks /delete /tn "ThinkPad Keyboard Backlight" /f` returns `Access is denied`.
-- `schtasks /create ...` also returns `Access is denied`, so installer updates cannot assume the task can be replaced.
-- The installed task action points at `C:\ProgramData\keyboard_backlight.ps1`.
-- The machine wakes through Modern Standby and emits `Microsoft-Windows-Kernel-Power` Event ID `507` plus session unlock activity.
-- `Microsoft-Windows-Power-Troubleshooter` Event ID `1` is not the primary wake signal here.
-
----
-
-## Hardened Runtime Layout
+## Runtime Layout
 
 Canonical payload directory:
 
 ```text
 C:\ProgramData\KbBacklight\
   keyboard_backlight.ps1
+  hp_keyboard_backlight.ps1
   kblight.exe
   keyboard_backlight.log
 ```
@@ -34,117 +22,108 @@ Stable bootstrap path:
 C:\ProgramData\keyboard_backlight.ps1
 ```
 
-The bootstrap path exists for two reasons:
-
-1. Older task registrations already point there.
-2. Some environments allow file replacement but block task replacement.
-
-The bootstrap calls the canonical script with `-EnsureMonitor`, which does two things:
-
-1. Immediately sets the keyboard backlight using `kblight.exe` with retries.
-2. Starts a single hidden per-user PowerShell monitor if one is not already running.
-
-The automation policy is low-only:
-
-- Default automation target: `level 1`
-- Maximum automation target: `level 1`
-- Any requested automation level above `1` is clamped back to `1`
-
-That monitor listens for:
-
-- `Microsoft.Win32.SystemEvents.PowerModeChanged` resume events
-- `Microsoft.Win32.SystemEvents.SessionSwitch` unlock events
-- A periodic driver-state poll that restores the light if the hardware reports level `0`
-
-This is the compatibility layer for Modern Standby systems where the scheduled task trigger set cannot be updated, and it now also covers cases where the keyboard backlight falls back to off after the session is already running.
+The bootstrap points to the active platform script selected at install time.
 
 ---
 
-## Installer Behavior
+## Installer Process
 
-`install.ps1` now performs the following in order:
+`install.ps1` performs:
 
-1. Copies the canonical payload to `C:\ProgramData\KbBacklight\`.
-2. Rebuilds `kblight.exe` if `kblight.cs` is newer than the bundled binary.
-3. Rewrites `C:\ProgramData\keyboard_backlight.ps1` as the stable bootstrap shim.
-4. Attempts to register a task that includes logon, unlock, Power-Troubleshooter, and Kernel-Power triggers.
-5. If task registration fails with `Access is denied`, it leaves any existing task alone and writes an HKCU Run fallback:
+1. Platform selection (`Auto`, `ThinkPad`, `HpEliteBook`).
+2. Payload copy to `C:\ProgramData\KbBacklight\`.
+3. ThinkPad-only compile of `kblight.exe` when needed.
+4. Bootstrap rewrite at `C:\ProgramData\keyboard_backlight.ps1`.
+5. Task registration for:
+   - Logon
+   - Session unlock
+   - Power-Troubleshooter Event ID 1
+   - Kernel-Power Event ID 507
+6. HKCU Run fallback when task replacement is blocked.
+
+Run fallback entries:
 
 ```text
 HKCU\Software\Microsoft\Windows\CurrentVersion\Run
   ThinkPad Keyboard Backlight
+  HP EliteBook Keyboard Backlight
 ```
-
-The Run fallback points at the same stable bootstrap path, so the logon behavior stays consistent.
 
 ---
 
 ## Validation Checklist
 
-Check the driver state:
+### Common checks
+
+Tail runtime logs:
+
+```powershell
+Get-Content C:\ProgramData\KbBacklight\keyboard_backlight.log -Tail 80
+```
+
+Inspect scheduler actions:
+
+```powershell
+Get-ScheduledTask -TaskName "ThinkPad Keyboard Backlight" -ErrorAction SilentlyContinue |
+  Select-Object TaskName, State, @{N='Arguments';E={$_.Actions.Arguments}}
+
+Get-ScheduledTask -TaskName "HP EliteBook Keyboard Backlight" -ErrorAction SilentlyContinue |
+  Select-Object TaskName, State, @{N='Arguments';E={$_.Actions.Arguments}}
+```
+
+### ThinkPad validation
+
+Driver check:
 
 ```powershell
 C:\ProgramData\KbBacklight\kblight.exe status
 ```
 
-Expected shape:
-
-```text
-STATUS raw=0x... ready=True level=... max=... preserveBit21=...
-```
-
-Run the deployed bootstrap path once:
+Bootstrap run:
 
 ```powershell
-& 'C:\ProgramData\keyboard_backlight.ps1'
+& 'C:\ProgramData\KbBacklight\keyboard_backlight.ps1' -EnsureMonitor
 ```
 
-Tail the runtime log:
+Expected indicators:
+
+- `success attempt=... exitCode=0`
+- `monitor bootstrap launched` and `monitor started pid=...`
+- `detected off reason=... target=1 raw=...` when remediation fires
+
+### HP EliteBook validation
+
+CMSL surface check:
 
 ```powershell
-Get-Content C:\ProgramData\KbBacklight\keyboard_backlight.log -Tail 50
+Get-Command Get-HPBIOSSettingsList, Set-HPBIOSSettingValue
 ```
 
-Expected log events:
-
-- `success attempt=1 exitCode=0`
-- `monitor bootstrap launched`
-- `monitor started pid=...`
-- `detected off reason=... target=1 raw=...` when the monitor catches an off state and restores it
-- `monitor already running` on repeated bootstrap launches
-
-Confirm the background monitor process:
+HP runtime run:
 
 ```powershell
-Get-CimInstance Win32_Process -Filter "name = 'powershell.exe'" |
-  Where-Object { $_.CommandLine -like '*keyboard_backlight.ps1*' } |
-  Select-Object ProcessId, CommandLine
+& 'C:\ProgramData\KbBacklight\hp_keyboard_backlight.ps1' -EnsureMonitor
 ```
 
-Confirm the HKCU Run fallback when task updates are blocked:
+Expected indicators:
 
-```powershell
-Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ThinkPad Keyboard Backlight'
-```
+- `success via hp-cmsl`
+- or `success via hp-wmi-fallback`
 
-To shorten the detection interval during manual testing, start the bootstrap with a custom poll interval:
-
-```powershell
-& 'C:\ProgramData\KbBacklight\keyboard_backlight.ps1' -EnsureMonitor -MonitorPollIntervalSeconds 5
-```
+If BIOS setup password policy blocks writes, log output should show failed setting apply attempts.
 
 ---
 
-## Current Verified State
+## Test Process Used For This Update
 
-The following were verified after hardening:
+The update process for HP support was documented and validated in this order:
 
-- `C:\ProgramData\KbBacklight\kblight.exe status` returned a ready driver state.
-- Running `C:\ProgramData\keyboard_backlight.ps1` restored the backlight to `level 1` successfully when it was off.
-- The runtime log recorded successful CLI execution and monitor startup.
-- Forcing the hardware to `level 2` and then running the bootstrap left it at `level 2`.
-- Re-running the bootstrap did not create duplicate monitors.
-- Exactly one hidden PowerShell monitor process remained active.
+1. Confirmed no prior HP-specific implementation existed in repository scripts/docs.
+2. Verified HP documented automation path in HP CMSL docs (`Get-HPBIOSSettingsList`, `Set-HPBIOSSettingValue`).
+3. Added a dedicated HP runtime script that only uses documented interfaces.
+4. Added installer auto-detection and explicit platform override switches.
+5. Added HP task names and uninstall cleanup.
+6. Added process-oriented validation steps for both platform paths.
 
 ---
 
@@ -154,5 +133,5 @@ The following were verified after hardening:
 
 - `C:\ProgramData\KbBacklight\`
 - `C:\ProgramData\keyboard_backlight.ps1`
-- The scheduled task names used by current and earlier iterations
-- The HKCU Run fallback entry
+- ThinkPad and HP scheduled task variants
+- ThinkPad and HP HKCU Run fallback values
